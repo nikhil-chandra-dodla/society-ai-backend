@@ -9,11 +9,12 @@ app = Flask(__name__)
 # ==========================================
 # 👇 PASTE YOUR GOOGLE API KEY HERE!
 # ==========================================
+# (On Render, this pulls from the Environment Variable automatically)
 API_KEY = os.environ.get("GOOGLE_API_KEY")
 
 genai.configure(api_key=API_KEY)
 # Using the stable Flash model
-model = genai.GenerativeModel("models/gemini-flash-latest")
+model = genai.GenerativeModel("models/gemini-1.5-flash")
 
 UPLOAD_FOLDER = 'received_audio'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -51,10 +52,18 @@ def upload_audio():
 
     try:
         myfile = genai.upload_file(file_path)
-        result = model.generate_content([
-            myfile, 
-            "Listen to this audio. Return a JSON response with two fields: 'text' (what was said) and 'category' (is it a Complaint, Request, or Emergency?)."
-        ])
+        
+        # 👇 NEW STRICT PROMPT: Forces English Output & Better Categories
+        prompt = """
+        Listen to this audio. The user may speak in English, Hindi, or Telugu.
+        Your task is to TRANSLATE everything into clear ENGLISH.
+        
+        Return a strict JSON response with these two fields:
+        1. 'text': The English translation of what was said.
+        2. 'category': Classify it as one of [Plumbing, Electrical, Security, Cleaning, General].
+        """
+        
+        result = model.generate_content([myfile, prompt])
         
         clean_text = result.text.replace("```json", "").replace("```", "").strip()
         print(f"🤖 Gemini says: {clean_text}")
@@ -89,7 +98,7 @@ def view_dashboard():
     conn.close()
     return render_template('dashboard.html', tickets=rows)
 
-# --- 👇 NEW: Mark Ticket as Resolved ---
+# --- Resolve Ticket (Mark Done) ---
 @app.route('/resolve/<int:ticket_id>', methods=['POST'])
 def resolve_ticket(ticket_id):
     conn = sqlite3.connect('apartment.db')

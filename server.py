@@ -14,7 +14,7 @@ API_KEY = os.environ.get("GOOGLE_API_KEY")
 
 genai.configure(api_key=API_KEY)
 # Using the stable Flash model
-model = genai.GenerativeModel("models/gemini-1.5-flash-latest")
+model = genai.GenerativeModel("models/gemini-flash-latest")
 
 UPLOAD_FOLDER = 'received_audio'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)

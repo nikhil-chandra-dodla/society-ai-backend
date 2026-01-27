@@ -9,12 +9,12 @@ app = Flask(__name__)
 # ==========================================
 # 👇 PASTE YOUR GOOGLE API KEY HERE!
 # ==========================================
-# (On Render, this pulls from the Environment Variable automatically)
 API_KEY = os.environ.get("GOOGLE_API_KEY")
 
 genai.configure(api_key=API_KEY)
-# Using the stable Flash model
-model = genai.GenerativeModel("gemini-1.5-flash")
+
+# 👇 RESTORED TO YOUR WORKING VERSION
+model = genai.GenerativeModel("models/gemini-flash-latest")
 
 UPLOAD_FOLDER = 'received_audio'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -53,7 +53,7 @@ def upload_audio():
     try:
         myfile = genai.upload_file(file_path)
         
-        # 👇 NEW STRICT PROMPT: Forces English Output & Better Categories
+        # 👇 STRICT PROMPT: Forces English Output & Better Categories
         prompt = """
         Listen to this audio. The user may speak in English, Hindi, or Telugu.
         Your task is to TRANSLATE everything into clear ENGLISH.
@@ -63,6 +63,7 @@ def upload_audio():
         2. 'category': Classify it as one of [Plumbing, Electrical, Security, Cleaning, General].
         """
         
+        # We pass the prompt + audio to the model
         result = model.generate_content([myfile, prompt])
         
         clean_text = result.text.replace("```json", "").replace("```", "").strip()
@@ -126,6 +127,5 @@ def get_tickets():
     return jsonify(tickets)
 
 if __name__ == '__main__':
-    # The Cloud sets an environment variable called 'PORT'
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)

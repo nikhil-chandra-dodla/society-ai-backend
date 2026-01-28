@@ -7,18 +7,18 @@ from flask import Flask, request, jsonify, render_template, redirect, url_for
 app = Flask(__name__)
 
 # ==========================================
-# 👇 PASTE YOUR GOOGLE API KEY HERE!
+# 👇 API KEY SETUP
 # ==========================================
 API_KEY = os.environ.get("GOOGLE_API_KEY")
-
 genai.configure(api_key=API_KEY)
-# Using the standard model
-model = genai.GenerativeModel("models/gemini-1.5-flash")
+
+# ✅ RESTORED YOUR EXACT WORKING MODEL NAME
+model = genai.GenerativeModel("models/gemini-flash-latest")
 
 UPLOAD_FOLDER = 'received_audio'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# --- Database Setup (YOUR ORIGINAL CODE) ---
+# --- Database Setup ---
 def init_db():
     conn = sqlite3.connect('apartment.db')
     c = conn.cursor()
@@ -33,51 +33,72 @@ def init_db():
 
 init_db()
 
-# --- 🧠 THE NEW PRIVACY FILTER FUNCTION ---
-def process_with_privacy_check(user_text):
-    """
-    Asks Gemini: Is this a complaint (Save it) or a Call (Ignore it)?
-    """
+# --- 🧠 THE AI BRAIN (Privacy Logic) ---
+def analyze_intent_and_process(text):
     prompt = f"""
-    Analyze this resident input: "{user_text}"
+    You are a Society AI. Analyze this input: "{text}"
     
     Rules:
-    1. If the user wants to CALL or MESSAGE (e.g., "Call 101", "Phone lagao", "Connect me"), output JSON:
+    1. If the user wants to CALL, MESSAGE, or CONTACT someone (e.g., "Call 101", "Phone lagao", "Message Flat 202", "Connect me"), output JSON:
        {{"intent": "private", "action": "call", "target": "101", "text": "Calling 101", "category": "Private"}}
 
-    2. If it is a COMPLAINT (e.g., "Tap leaking", "Lift stuck", "Pani nahi hai"), output JSON:
-       {{"intent": "complaint", "category": "Maintenance", "text": "Issue detected: {user_text}", "action": "none", "target": "none"}}
-       (Categories: Plumbing, Electrical, Security, Cleaning, General).
+    2. If it is a COMPLAINT or ISSUE (e.g., "Tap leaking", "Lift stuck", "Pani nahi hai", "Garbage not collected", "SOS"), output JSON:
+       {{"intent": "complaint", "category": "Maintenance", "text": "Issue detected: {text}", "action": "none", "target": "none"}}
 
     Output ONLY raw JSON. No markdown.
     """
     
     try:
         response = model.generate_content(prompt)
-        clean_text = response.text.replace("```json", "").replace("```", "").strip()
-        data = json.loads(clean_text)
-        
-        # 🚦 THE CHECK: Only save if it is a complaint
-        if data.get('intent') == 'complaint':
-            conn = sqlite3.connect('apartment.db')
-            c = conn.cursor()
-            c.execute("INSERT INTO tickets (category, description, status) VALUES (?, ?, ?)",
-                      (data['category'], data['text'], 'Open'))
-            conn.commit()
-            conn.close()
-            print(f"✅ Ticket Saved: {data['text']}")
-        else:
-            print(f"🔒 Private Action (Not Saved): {data['text']}")
-            
-        return data
-
+        cleaned_text = response.text.replace("```json", "").replace("```", "").strip()
+        return json.loads(cleaned_text)
     except Exception as e:
         print(f"AI Error: {e}")
-        return {"intent": "complaint", "category": "General", "text": user_text} # Fallback
+        # Fallback to complaint if AI fails
+        return {"intent": "complaint", "category": "General", "text": text}
 
 @app.route('/')
 def home():
     return "The Server is Alive!"
+
+# --- Handle Text Commands ---
+@app.route('/upload_text', methods=['POST'])
+def upload_text():
+    data = request.json
+    if not data or 'text' not in data:
+        return jsonify({"message": "No text provided", "status": "error"}), 400
+    
+    user_text = data['text']
+    print(f"📩 Received: {user_text}")
+
+    try:
+        # 1. Analyze Intent
+        ai_data = analyze_intent_and_process(user_text)
+        print(f"🤖 AI Analysis: {ai_data}")
+        
+        # 2. PRIVACY CHECK
+        if ai_data.get('intent') == 'complaint':
+            # ✅ Save to DB
+            conn = sqlite3.connect('apartment.db')
+            c = conn.cursor()
+            c.execute("INSERT INTO tickets (category, description, status) VALUES (?, ?, ?)",
+                      (ai_data['category'], ai_data['text'], 'Open'))
+            conn.commit()
+            conn.close()
+            print("✅ Ticket Saved")
+        else:
+            # 🛑 Private Action
+            print("🔒 Private Action - Not Saved")
+
+        return jsonify({
+            "message": "Processed", 
+            "ai_response": json.dumps(ai_data), 
+            "status": "success"
+        })
+
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        return jsonify({"message": f"Server Error: {e}", "status": "error"}), 500
 
 # --- Handle Voice Commands ---
 @app.route('/upload_audio', methods=['POST'])
@@ -91,10 +112,8 @@ def upload_audio():
     
     try:
         myfile = genai.upload_file(file_path)
-        
-        # Ask Gemini to transcode AND analyze in one step
         prompt = """
-        Listen to this audio.
+        Listen to this audio. 
         If it is a command to Call/Message, output JSON with intent='private'.
         If it is a Complaint, output JSON with intent='complaint'.
         Output ONLY valid JSON: { "intent": "...", "category": "...", "text": "...", "action": "...", "target": "..." }
@@ -102,42 +121,27 @@ def upload_audio():
         
         result = model.generate_content([myfile, prompt])
         clean_text = result.text.replace("```json", "").replace("```", "").strip()
-        data = json.loads(clean_text)
-
-        # 🚦 PRIVACY CHECK FOR AUDIO
-        if data.get('intent') == 'complaint':
+        ai_data = json.loads(clean_text)
+        
+        # Privacy Check
+        if ai_data.get('intent') == 'complaint':
             conn = sqlite3.connect('apartment.db')
             c = conn.cursor()
             c.execute("INSERT INTO tickets (category, description, status) VALUES (?, ?, ?)",
-                      (data['category'], data['text'], 'Open'))
+                      (ai_data['category'], ai_data['text'], 'Open'))
             conn.commit()
             conn.close()
 
         return jsonify({
             "message": "Processed", 
-            "ai_response": json.dumps(data), # Send JSON string to App
+            "ai_response": json.dumps(ai_data),
             "status": "success"
         })
 
     except Exception as e:
         return jsonify({"message": f"AI Error: {e}", "status": "error"}), 500
 
-# --- Handle Text Commands ---
-@app.route('/upload_text', methods=['POST'])
-def upload_text():
-    data = request.json
-    user_text = data.get('text', '')
-    
-    # Use the new privacy function
-    ai_data = process_with_privacy_check(user_text)
-
-    return jsonify({
-        "message": "Processed", 
-        "ai_response": json.dumps(ai_data), # Send JSON string to App
-        "status": "success"
-    })
-
-# --- View Dashboard (YOUR ORIGINAL CODE) ---
+# --- Dashboard & API ---
 @app.route('/dashboard')
 def view_dashboard():
     conn = sqlite3.connect('apartment.db')
@@ -148,7 +152,6 @@ def view_dashboard():
     conn.close()
     return render_template('dashboard.html', tickets=rows)
 
-# --- Resolve Ticket (YOUR ORIGINAL CODE) ---
 @app.route('/resolve/<int:ticket_id>', methods=['POST'])
 def resolve_ticket(ticket_id):
     conn = sqlite3.connect('apartment.db')
@@ -158,7 +161,6 @@ def resolve_ticket(ticket_id):
     conn.close()
     return redirect(url_for('view_dashboard'))
 
-# --- API for JSON Data (YOUR ORIGINAL CODE) ---
 @app.route('/tickets', methods=['GET'])
 def get_tickets():
     conn = sqlite3.connect('apartment.db')

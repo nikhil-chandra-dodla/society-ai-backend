@@ -12,14 +12,13 @@ app = Flask(__name__)
 API_KEY = os.environ.get("GOOGLE_API_KEY")
 
 genai.configure(api_key=API_KEY)
-
-# 👇 RESTORED TO YOUR WORKING VERSION
-model = genai.GenerativeModel("models/gemini-flash-latest")
+# Using the standard model
+model = genai.GenerativeModel("models/gemini-1.5-flash")
 
 UPLOAD_FOLDER = 'received_audio'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# --- Database Setup ---
+# --- Database Setup (YOUR ORIGINAL CODE) ---
 def init_db():
     conn = sqlite3.connect('apartment.db')
     c = conn.cursor()
@@ -33,6 +32,48 @@ def init_db():
     conn.close()
 
 init_db()
+
+# --- 🧠 THE NEW PRIVACY FILTER FUNCTION ---
+def process_with_privacy_check(user_text):
+    """
+    Asks Gemini: Is this a complaint (Save it) or a Call (Ignore it)?
+    """
+    prompt = f"""
+    Analyze this resident input: "{user_text}"
+    
+    Rules:
+    1. If the user wants to CALL or MESSAGE (e.g., "Call 101", "Phone lagao", "Connect me"), output JSON:
+       {{"intent": "private", "action": "call", "target": "101", "text": "Calling 101", "category": "Private"}}
+
+    2. If it is a COMPLAINT (e.g., "Tap leaking", "Lift stuck", "Pani nahi hai"), output JSON:
+       {{"intent": "complaint", "category": "Maintenance", "text": "Issue detected: {user_text}", "action": "none", "target": "none"}}
+       (Categories: Plumbing, Electrical, Security, Cleaning, General).
+
+    Output ONLY raw JSON. No markdown.
+    """
+    
+    try:
+        response = model.generate_content(prompt)
+        clean_text = response.text.replace("```json", "").replace("```", "").strip()
+        data = json.loads(clean_text)
+        
+        # 🚦 THE CHECK: Only save if it is a complaint
+        if data.get('intent') == 'complaint':
+            conn = sqlite3.connect('apartment.db')
+            c = conn.cursor()
+            c.execute("INSERT INTO tickets (category, description, status) VALUES (?, ?, ?)",
+                      (data['category'], data['text'], 'Open'))
+            conn.commit()
+            conn.close()
+            print(f"✅ Ticket Saved: {data['text']}")
+        else:
+            print(f"🔒 Private Action (Not Saved): {data['text']}")
+            
+        return data
+
+    except Exception as e:
+        print(f"AI Error: {e}")
+        return {"intent": "complaint", "category": "General", "text": user_text} # Fallback
 
 @app.route('/')
 def home():
@@ -48,93 +89,55 @@ def upload_audio():
     file_path = os.path.join(UPLOAD_FOLDER, "command.m4a")
     audio_file.save(file_path)
     
-    print(f"🎤 Audio saved. Sending to Gemini...")
-
     try:
         myfile = genai.upload_file(file_path)
         
-        # 👇 STRICT PROMPT: Forces English Output & Better Categories
+        # Ask Gemini to transcode AND analyze in one step
         prompt = """
-        Listen to this audio. The user may speak in English, Hindi, or Telugu.
-        Your task is to TRANSLATE everything into clear ENGLISH.
-        
-        Return a strict JSON response with these two fields:
-        1. 'text': The English translation of what was said.
-        2. 'category': Classify it as one of [Plumbing, Electrical, Security, Cleaning, General].
+        Listen to this audio.
+        If it is a command to Call/Message, output JSON with intent='private'.
+        If it is a Complaint, output JSON with intent='complaint'.
+        Output ONLY valid JSON: { "intent": "...", "category": "...", "text": "...", "action": "...", "target": "..." }
         """
         
-        # We pass the prompt + audio to the model
         result = model.generate_content([myfile, prompt])
-        
         clean_text = result.text.replace("```json", "").replace("```", "").strip()
-        print(f"🤖 Gemini says: {clean_text}")
-        
-        # Save to DB
-        data = json.loads(clean_text) 
-        conn = sqlite3.connect('apartment.db')
-        c = conn.cursor()
-        c.execute("INSERT INTO tickets (category, description, status) VALUES (?, ?, ?)",
-                  (data['category'], data['text'], 'Open'))
-        conn.commit()
-        conn.close()
+        data = json.loads(clean_text)
+
+        # 🚦 PRIVACY CHECK FOR AUDIO
+        if data.get('intent') == 'complaint':
+            conn = sqlite3.connect('apartment.db')
+            c = conn.cursor()
+            c.execute("INSERT INTO tickets (category, description, status) VALUES (?, ?, ?)",
+                      (data['category'], data['text'], 'Open'))
+            conn.commit()
+            conn.close()
 
         return jsonify({
-            "message": "Processed and Saved", 
-            "ai_response": clean_text,
+            "message": "Processed", 
+            "ai_response": json.dumps(data), # Send JSON string to App
             "status": "success"
         })
 
     except Exception as e:
-        print(f"❌ Error: {e}")
         return jsonify({"message": f"AI Error: {e}", "status": "error"}), 500
 
-# --- 👇 NEW: Handle Text Commands (Chat) ---
+# --- Handle Text Commands ---
 @app.route('/upload_text', methods=['POST'])
 def upload_text():
     data = request.json
-    if not data or 'text' not in data:
-        return jsonify({"message": "No text provided", "status": "error"}), 400
+    user_text = data.get('text', '')
     
-    user_text = data['text']
-    print(f"📩 Received Text: {user_text}")
+    # Use the new privacy function
+    ai_data = process_with_privacy_check(user_text)
 
-    try:
-        # Reuse the prompt logic to get consistent JSON
-        prompt = f"""
-        Analyze this resident complaint: "{user_text}"
-        
-        The user may write in English, Hindi, or Telugu (English script).
-        TRANSLATE to clear English if needed.
+    return jsonify({
+        "message": "Processed", 
+        "ai_response": json.dumps(ai_data), # Send JSON string to App
+        "status": "success"
+    })
 
-        Return a strict JSON response with:
-        1. 'text': The polished English version.
-        2. 'category': One of [Plumbing, Electrical, Security, Cleaning, General].
-        """
-        
-        # We pass the prompt to the model
-        result = model.generate_content(prompt)
-        clean_text = result.text.replace("```json", "").replace("```", "").strip()
-        
-        # Save to DB
-        parsed_data = json.loads(clean_text) 
-        conn = sqlite3.connect('apartment.db')
-        c = conn.cursor()
-        c.execute("INSERT INTO tickets (category, description, status) VALUES (?, ?, ?)",
-                  (parsed_data['category'], parsed_data['text'], 'Open'))
-        conn.commit()
-        conn.close()
-
-        return jsonify({
-            "message": "Text Saved", 
-            "ai_response": clean_text,
-            "status": "success"
-        })
-
-    except Exception as e:
-        print(f"❌ Error: {e}")
-        return jsonify({"message": f"AI Error: {e}", "status": "error"}), 500
-
-# --- View Dashboard ---
+# --- View Dashboard (YOUR ORIGINAL CODE) ---
 @app.route('/dashboard')
 def view_dashboard():
     conn = sqlite3.connect('apartment.db')
@@ -145,19 +148,17 @@ def view_dashboard():
     conn.close()
     return render_template('dashboard.html', tickets=rows)
 
-# --- Resolve Ticket (Mark Done) ---
+# --- Resolve Ticket (YOUR ORIGINAL CODE) ---
 @app.route('/resolve/<int:ticket_id>', methods=['POST'])
 def resolve_ticket(ticket_id):
     conn = sqlite3.connect('apartment.db')
     c = conn.cursor()
-    # Update the status in the database
     c.execute("UPDATE tickets SET status = 'Resolved' WHERE id = ?", (ticket_id,))
     conn.commit()
     conn.close()
-    # Refresh the dashboard page
     return redirect(url_for('view_dashboard'))
 
-# --- API for JSON Data ---
+# --- API for JSON Data (YOUR ORIGINAL CODE) ---
 @app.route('/tickets', methods=['GET'])
 def get_tickets():
     conn = sqlite3.connect('apartment.db')

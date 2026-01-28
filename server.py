@@ -11,7 +11,7 @@ app = Flask(__name__)
 # ==========================================
 API_KEY = os.environ.get("GOOGLE_API_KEY")
 genai.configure(api_key=API_KEY)
-model = genai.GenerativeModel("models/gemini-1.5-flash") # Use 'gemini-pro' if this fails
+model = genai.GenerativeModel("models/gemini-flash-latest") # Use 'gemini-pro' if this fails
 
 UPLOAD_FOLDER = 'received_audio'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)

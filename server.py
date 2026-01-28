@@ -88,6 +88,52 @@ def upload_audio():
         print(f"❌ Error: {e}")
         return jsonify({"message": f"AI Error: {e}", "status": "error"}), 500
 
+# --- 👇 NEW: Handle Text Commands (Chat) ---
+@app.route('/upload_text', methods=['POST'])
+def upload_text():
+    data = request.json
+    if not data or 'text' not in data:
+        return jsonify({"message": "No text provided", "status": "error"}), 400
+    
+    user_text = data['text']
+    print(f"📩 Received Text: {user_text}")
+
+    try:
+        # Reuse the prompt logic to get consistent JSON
+        prompt = f"""
+        Analyze this resident complaint: "{user_text}"
+        
+        The user may write in English, Hindi, or Telugu (English script).
+        TRANSLATE to clear English if needed.
+
+        Return a strict JSON response with:
+        1. 'text': The polished English version.
+        2. 'category': One of [Plumbing, Electrical, Security, Cleaning, General].
+        """
+        
+        # We pass the prompt to the model
+        result = model.generate_content(prompt)
+        clean_text = result.text.replace("```json", "").replace("```", "").strip()
+        
+        # Save to DB
+        parsed_data = json.loads(clean_text) 
+        conn = sqlite3.connect('apartment.db')
+        c = conn.cursor()
+        c.execute("INSERT INTO tickets (category, description, status) VALUES (?, ?, ?)",
+                  (parsed_data['category'], parsed_data['text'], 'Open'))
+        conn.commit()
+        conn.close()
+
+        return jsonify({
+            "message": "Text Saved", 
+            "ai_response": clean_text,
+            "status": "success"
+        })
+
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        return jsonify({"message": f"AI Error: {e}", "status": "error"}), 500
+
 # --- View Dashboard ---
 @app.route('/dashboard')
 def view_dashboard():

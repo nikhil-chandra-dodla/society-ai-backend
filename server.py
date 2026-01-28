@@ -11,13 +11,11 @@ app = Flask(__name__)
 # ==========================================
 API_KEY = os.environ.get("GOOGLE_API_KEY")
 genai.configure(api_key=API_KEY)
-# Using your working model
-model = genai.GenerativeModel("models/gemini-flash-latest")
+model = genai.GenerativeModel("models/gemini-1.5-flash") # Use 'gemini-pro' if this fails
 
 UPLOAD_FOLDER = 'received_audio'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# --- Database Setup ---
 def init_db():
     conn = sqlite3.connect('apartment.db')
     c = conn.cursor()
@@ -32,77 +30,44 @@ def init_db():
 
 init_db()
 
-# --- 🧠 THE AI BRAIN (Privacy Logic) ---
-def analyze_intent_and_process(text):
+# --- 🧠 FORCE LOGIC FUNCTION ---
+def strict_privacy_check(text):
+    text_lower = text.lower()
+    
+    # 1. HARD RULE: If these words exist, it is 100% PRIVATE.
+    # We do NOT ask the AI's opinion for these.
+    private_keywords = ["call", "phone", "message", "contact", "connect", "ring", "talk to"]
+    
+    for word in private_keywords:
+        if word in text_lower:
+            # Extract target (simple logic: look for numbers)
+            target = ''.join(filter(str.isdigit, text)) or "Security"
+            return {
+                "intent": "private",
+                "action": "call" if "mess" not in text_lower else "message",
+                "target": target,
+                "text": text,
+                "category": "Private"
+            }
+
+    # 2. If no keywords, ask AI to classify the complaint
     prompt = f"""
-    You are a Society AI Security System. Analyze this input: "{text}"
-    
-    CRITICAL RULES:
-    1. IF the input contains "call", "message", "phone", "contact", "connect", "talk to", "ring", or mentions a flat number for connection (e.g. "Call 101", "Message 202"):
-       -> YOU MUST classify this as "private".
-       -> Output JSON: {{"intent": "private", "action": "call", "target": "101", "text": "Calling 101", "category": "Private"}}
-
-    2. IF the input is about a broken item, maintenance, water, electricity, lift, or danger:
-       -> Classify as "complaint".
-       -> Output JSON: {{"intent": "complaint", "category": "Maintenance", "text": "Issue detected: {text}", "action": "none", "target": "none"}}
-
-    3. If unsure, default to "complaint".
-
-    Output ONLY raw JSON. No markdown.
+    Analyze this complaint: "{text}"
+    Output valid JSON: {{"intent": "complaint", "category": "Maintenance", "text": "Issue: {text}"}}
+    Categories: Plumbing, Electrical, Security, Cleaning.
     """
-    
     try:
         response = model.generate_content(prompt)
-        cleaned_text = response.text.replace("```json", "").replace("```", "").strip()
-        return json.loads(cleaned_text)
-    except Exception as e:
-        print(f"AI Error: {e}")
+        clean_text = response.text.replace("```json", "").replace("```", "").strip()
+        return json.loads(clean_text)
+    except:
         return {"intent": "complaint", "category": "General", "text": text}
 
 @app.route('/')
 def home():
-    return "The Server is Alive!"
+    return "Server Running with Force-Privacy Logic!"
 
-# --- Handle Text Commands ---
-@app.route('/upload_text', methods=['POST'])
-def upload_text():
-    data = request.json
-    if not data or 'text' not in data:
-        return jsonify({"message": "No text provided", "status": "error"}), 400
-    
-    user_text = data['text']
-    print(f"📩 Received Text: {user_text}")
-
-    try:
-        # 1. Analyze Intent
-        ai_data = analyze_intent_and_process(user_text)
-        print(f"🤖 AI Analysis: {ai_data}")
-        
-        # 2. PRIVACY CHECK (The Gatekeeper)
-        if ai_data.get('intent') == 'complaint':
-            # ✅ Save Complaint
-            conn = sqlite3.connect('apartment.db')
-            c = conn.cursor()
-            c.execute("INSERT INTO tickets (category, description, status) VALUES (?, ?, ?)",
-                      (ai_data['category'], ai_data['text'], 'Open'))
-            conn.commit()
-            conn.close()
-            print("✅ Ticket Saved")
-        else:
-            # 🛑 Private Action (Ignored)
-            print(f"🔒 Private Action Detected ({user_text}) - NOT SAVED to DB")
-
-        return jsonify({
-            "message": "Processed", 
-            "ai_response": json.dumps(ai_data), 
-            "status": "success"
-        })
-
-    except Exception as e:
-        print(f"❌ Error: {e}")
-        return jsonify({"message": f"Server Error: {e}", "status": "error"}), 500
-
-# --- Handle Voice Commands ---
+# --- AUDIO HANDLER ---
 @app.route('/upload_audio', methods=['POST'])
 def upload_audio():
     if 'audio' not in request.files:
@@ -113,25 +78,28 @@ def upload_audio():
     audio_file.save(file_path)
     
     try:
+        # 1. Transcribe Audio ONLY (Don't analyze yet)
         myfile = genai.upload_file(file_path)
-        prompt = """
-        Listen to this audio.
-        1. If user says "Call", "Message", "Phone", classify as intent='private'.
-        2. If user reports an issue (water, lift, broken), classify as intent='complaint'.
-        Output ONLY valid JSON: { "intent": "...", "category": "...", "text": "...", "action": "...", "target": "..." }
-        """
+        transcribe_prompt = "Transcribe this audio exactly into English text. Output ONLY the text."
+        result = model.generate_content([myfile, transcribe_prompt])
+        transcribed_text = result.text.strip()
         
-        result = model.generate_content([myfile, prompt])
-        clean_text = result.text.replace("```json", "").replace("```", "").strip()
-        ai_data = json.loads(clean_text)
+        print(f"🎤 Heard: {transcribed_text}")
+
+        # 2. Run Strict Privacy Check
+        ai_data = strict_privacy_check(transcribed_text)
         
+        # 3. Save ONLY if Complaint
         if ai_data.get('intent') == 'complaint':
             conn = sqlite3.connect('apartment.db')
             c = conn.cursor()
             c.execute("INSERT INTO tickets (category, description, status) VALUES (?, ?, ?)",
-                      (ai_data['category'], ai_data['text'], 'Open'))
+                      (ai_data.get('category', 'General'), ai_data.get('text'), 'Open'))
             conn.commit()
             conn.close()
+            print("✅ Ticket Saved")
+        else:
+            print("🔒 Private Call Detected - DB Skipped")
 
         return jsonify({
             "message": "Processed", 
@@ -140,9 +108,33 @@ def upload_audio():
         })
 
     except Exception as e:
-        return jsonify({"message": f"AI Error: {e}", "status": "error"}), 500
+        print(f"Error: {e}")
+        return jsonify({"message": f"Server Error: {e}", "status": "error"}), 500
 
-# --- Dashboard & API ---
+# --- TEXT HANDLER ---
+@app.route('/upload_text', methods=['POST'])
+def upload_text():
+    data = request.json
+    user_text = data.get('text', '')
+    
+    # Run Strict Privacy Check
+    ai_data = strict_privacy_check(user_text)
+
+    if ai_data.get('intent') == 'complaint':
+        conn = sqlite3.connect('apartment.db')
+        c = conn.cursor()
+        c.execute("INSERT INTO tickets (category, description, status) VALUES (?, ?, ?)",
+                  (ai_data.get('category', 'General'), ai_data.get('text'), 'Open'))
+        conn.commit()
+        conn.close()
+
+    return jsonify({
+        "message": "Processed", 
+        "ai_response": json.dumps(ai_data), 
+        "status": "success"
+    })
+
+# --- Dashboard & Tickets ---
 @app.route('/dashboard')
 def view_dashboard():
     conn = sqlite3.connect('apartment.db')
@@ -170,10 +162,7 @@ def get_tickets():
     c.execute("SELECT * FROM tickets ORDER BY id DESC")
     rows = c.fetchall()
     conn.close()
-    
-    tickets = []
-    for row in rows:
-        tickets.append(dict(row))
+    tickets = [dict(row) for row in rows]
     return jsonify(tickets)
 
 if __name__ == '__main__':

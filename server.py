@@ -11,8 +11,7 @@ app = Flask(__name__)
 # ==========================================
 API_KEY = os.environ.get("GOOGLE_API_KEY")
 genai.configure(api_key=API_KEY)
-
-# ✅ RESTORED YOUR EXACT WORKING MODEL NAME
+# Using your working model
 model = genai.GenerativeModel("models/gemini-flash-latest")
 
 UPLOAD_FOLDER = 'received_audio'
@@ -36,14 +35,18 @@ init_db()
 # --- 🧠 THE AI BRAIN (Privacy Logic) ---
 def analyze_intent_and_process(text):
     prompt = f"""
-    You are a Society AI. Analyze this input: "{text}"
+    You are a Society AI Security System. Analyze this input: "{text}"
     
-    Rules:
-    1. If the user wants to CALL, MESSAGE, or CONTACT someone (e.g., "Call 101", "Phone lagao", "Message Flat 202", "Connect me"), output JSON:
-       {{"intent": "private", "action": "call", "target": "101", "text": "Calling 101", "category": "Private"}}
+    CRITICAL RULES:
+    1. IF the input contains "call", "message", "phone", "contact", "connect", "talk to", "ring", or mentions a flat number for connection (e.g. "Call 101", "Message 202"):
+       -> YOU MUST classify this as "private".
+       -> Output JSON: {{"intent": "private", "action": "call", "target": "101", "text": "Calling 101", "category": "Private"}}
 
-    2. If it is a COMPLAINT or ISSUE (e.g., "Tap leaking", "Lift stuck", "Pani nahi hai", "Garbage not collected", "SOS"), output JSON:
-       {{"intent": "complaint", "category": "Maintenance", "text": "Issue detected: {text}", "action": "none", "target": "none"}}
+    2. IF the input is about a broken item, maintenance, water, electricity, lift, or danger:
+       -> Classify as "complaint".
+       -> Output JSON: {{"intent": "complaint", "category": "Maintenance", "text": "Issue detected: {text}", "action": "none", "target": "none"}}
+
+    3. If unsure, default to "complaint".
 
     Output ONLY raw JSON. No markdown.
     """
@@ -54,7 +57,6 @@ def analyze_intent_and_process(text):
         return json.loads(cleaned_text)
     except Exception as e:
         print(f"AI Error: {e}")
-        # Fallback to complaint if AI fails
         return {"intent": "complaint", "category": "General", "text": text}
 
 @app.route('/')
@@ -69,16 +71,16 @@ def upload_text():
         return jsonify({"message": "No text provided", "status": "error"}), 400
     
     user_text = data['text']
-    print(f"📩 Received: {user_text}")
+    print(f"📩 Received Text: {user_text}")
 
     try:
         # 1. Analyze Intent
         ai_data = analyze_intent_and_process(user_text)
         print(f"🤖 AI Analysis: {ai_data}")
         
-        # 2. PRIVACY CHECK
+        # 2. PRIVACY CHECK (The Gatekeeper)
         if ai_data.get('intent') == 'complaint':
-            # ✅ Save to DB
+            # ✅ Save Complaint
             conn = sqlite3.connect('apartment.db')
             c = conn.cursor()
             c.execute("INSERT INTO tickets (category, description, status) VALUES (?, ?, ?)",
@@ -87,8 +89,8 @@ def upload_text():
             conn.close()
             print("✅ Ticket Saved")
         else:
-            # 🛑 Private Action
-            print("🔒 Private Action - Not Saved")
+            # 🛑 Private Action (Ignored)
+            print(f"🔒 Private Action Detected ({user_text}) - NOT SAVED to DB")
 
         return jsonify({
             "message": "Processed", 
@@ -113,9 +115,9 @@ def upload_audio():
     try:
         myfile = genai.upload_file(file_path)
         prompt = """
-        Listen to this audio. 
-        If it is a command to Call/Message, output JSON with intent='private'.
-        If it is a Complaint, output JSON with intent='complaint'.
+        Listen to this audio.
+        1. If user says "Call", "Message", "Phone", classify as intent='private'.
+        2. If user reports an issue (water, lift, broken), classify as intent='complaint'.
         Output ONLY valid JSON: { "intent": "...", "category": "...", "text": "...", "action": "...", "target": "..." }
         """
         
@@ -123,7 +125,6 @@ def upload_audio():
         clean_text = result.text.replace("```json", "").replace("```", "").strip()
         ai_data = json.loads(clean_text)
         
-        # Privacy Check
         if ai_data.get('intent') == 'complaint':
             conn = sqlite3.connect('apartment.db')
             c = conn.cursor()
